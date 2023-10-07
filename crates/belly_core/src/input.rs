@@ -28,7 +28,9 @@ impl Plugin for ElementsInputPlugin {
             )
             .configure_sets(
                 PreUpdate,
-                (InternalInputSystemsSet, InputSystemsSet).chain(),
+                (InternalInputSystemsSet, InputSystemsSet)
+                    .chain()
+                    .after(bevy::input::InputSystem),
             );
     }
 }
@@ -181,7 +183,8 @@ pub struct NodeQuery {
     computed_visibility: Option<&'static ComputedVisibility>,
 }
 
-// pointer_input_system is the rewriten bevy's ui_focus_system
+// TODO: split touch and mouse input into separate systems
+// pointer_input_system is the rewritten bevy's ui_focus_system
 // it emit PointerEvent with associated entities and data.
 pub fn pointer_input_system(
     mut state: Local<State>,
@@ -191,48 +194,35 @@ pub fn pointer_input_system(
     mouse_button_input: Res<Input<MouseButton>>,
     touches_input: Res<Touches>,
     ui_stack: Res<UiStack>,
+    ui_scale: Res<UiScale>,
     time: Res<Time>,
     mut node_query: Query<NodeQuery>,
     mut events: EventWriter<PointerInput>,
 ) {
-    let up =
-        mouse_button_input.just_released(MouseButton::Left) || touches_input.any_just_released();
-    let down =
-        mouse_button_input.just_pressed(MouseButton::Left) || touches_input.any_just_pressed();
+    let up = mouse_button_input.just_released(MouseButton::Left) || touches_input.just_released(0);
 
-    let is_ui_disabled =
-        |camera_ui| matches!(camera_ui, Some(&UiCameraConfig { show_ui: false, .. }));
+    let down = mouse_button_input.just_pressed(MouseButton::Left) || touches_input.just_pressed(0);
 
-    let cursor_position = camera
-        .iter()
-        .filter(|(_, camera_ui)| !is_ui_disabled(*camera_ui))
-        .filter_map(|(camera, _)| {
-            if let RenderTarget::Window(window_ref) = camera.target {
-                Some(window_ref)
-            } else {
-                None
-            }
-        })
-        .filter_map(|window_ref| {
-            if let WindowRef::Entity(entity) = window_ref {
-                windows.get(entity).ok()
-            } else {
-                primary_window.get_single().ok()
-            }
-        })
-        .filter(|window| window.focused)
-        .find_map(|window| window.cursor_position())
-        .or_else(|| touches_input.first_pressed_position());
+    let cursor_position = match touches_input.get_pressed(0) {
+        Some(touch) => Some(touch.position() / ui_scale.scale as f32),
+        None => match cursor_position_from_cameras(camera, windows, primary_window) {
+            Some(cursor_loc) => Some(cursor_loc / ui_scale.scale as f32),
+            None => None,
+        },
+    };
 
     if down {
         state.press_position = cursor_position;
         state.drag_accumulator = Vec2::ZERO;
     }
+
     let delta = match (cursor_position, state.last_cursor_position) {
         (Some(c), Some(l)) => c - l,
         _ => Vec2::ZERO,
     };
+
     state.last_cursor_position = cursor_position;
+
     let mut moused_over_nodes = ui_stack
         .uinodes
         .iter()
@@ -257,7 +247,7 @@ pub fn pointer_input_system(
                     max = Vec2::min(max, clip.clip.max);
                 }
                 // if the current cursor position is within the bounds of the node, consider it for
-                // emiting the event
+                // emitting the event
                 let contains_cursor = if let Some(cursor_position) = cursor_position {
                     (min.x..max.x).contains(&cursor_position.x)
                         && (min.y..max.y).contains(&cursor_position.y)
@@ -283,12 +273,15 @@ pub fn pointer_input_system(
     let mut drag_entities = vec![];
     let mut motion_entities = vec![];
     let mut drag_start_entities = vec![];
-    if delta.length_squared() > 0.0 && !state.dragging && !state.pressed_entities.is_empty() {
+
+    if delta.length_squared() >= 50.0 && !state.dragging && !state.pressed_entities.is_empty() {
         state.dragging = true;
         drag_start_entities = state.pressed_entities.clone();
     }
+
     let send_drag_stop = state.dragging && up;
     let mut drag_stop_entities = vec![];
+
     if send_drag_stop {
         drag_stop_entities = state.dragging_from.clone();
     }
@@ -315,7 +308,7 @@ pub fn pointer_input_system(
                 pressed_entities.push(entity);
             }
         }
-        if delta != Vec2::ZERO {
+        if delta.length_squared() >= 10.0 {
             if state.dragging {
                 drag_entities.push(entity);
             } else {
@@ -335,7 +328,7 @@ pub fn pointer_input_system(
     }
 
     let Some(pos) = cursor_position else { return };
-    if down_entities.len() > 0 {
+    if !down_entities.is_empty() {
         if time.elapsed_seconds() - state.was_down_at < 0.3 && down_entities == state.was_down {
             state.presses += 1;
         } else {
@@ -351,7 +344,7 @@ pub fn pointer_input_system(
             data: PointerInputData::Down { presses },
         });
     }
-    if pressed_entities.len() > 0 {
+    if !pressed_entities.is_empty() {
         let presses = state.presses;
         events.send(PointerInput {
             pos,
@@ -360,7 +353,7 @@ pub fn pointer_input_system(
             data: PointerInputData::Pressed { presses },
         });
     }
-    if motion_entities.len() > 0 {
+    if !motion_entities.is_empty() {
         events.send(PointerInput {
             pos,
             delta,
@@ -368,7 +361,7 @@ pub fn pointer_input_system(
             data: PointerInputData::Motion,
         });
     }
-    if drag_start_entities.len() > 0 {
+    if !drag_start_entities.is_empty() {
         state.dragging_from = drag_start_entities.clone();
         events.send(PointerInput {
             pos,
@@ -377,7 +370,7 @@ pub fn pointer_input_system(
             data: PointerInputData::DragStart,
         });
     }
-    if drag_entities.len() > 0 && drag_stop_entities.is_empty() {
+    if !drag_entities.is_empty() && drag_stop_entities.is_empty() {
         events.send(PointerInput {
             pos,
             delta,
@@ -387,7 +380,7 @@ pub fn pointer_input_system(
             },
         });
     }
-    if drag_stop_entities.len() > 0 {
+    if !drag_stop_entities.is_empty() {
         events.send(PointerInput {
             pos,
             delta,
@@ -395,7 +388,7 @@ pub fn pointer_input_system(
             data: PointerInputData::DragStop,
         });
     }
-    if up_entities.len() > 0 {
+    if !up_entities.is_empty() {
         let presses = state.presses;
         events.send(PointerInput {
             pos,
@@ -411,6 +404,37 @@ pub fn pointer_input_system(
         state.press_position = None;
         state.dragging = false;
     }
+}
+
+/// gets cursor from Main Window if its ui is not disabled
+fn cursor_position_from_cameras(
+    camera: Query<'_, '_, (&Camera, Option<&UiCameraConfig>)>,
+    windows: Query<'_, '_, &Window, Without<PrimaryWindow>>,
+    primary_window: Query<'_, '_, &Window, With<PrimaryWindow>>,
+) -> Option<Vec2> {
+    let is_ui_disabled =
+        |camera_ui| matches!(camera_ui, Some(&UiCameraConfig { show_ui: false, .. }));
+
+    let cursor_position = camera
+        .iter()
+        .filter(|(_, camera_ui)| !is_ui_disabled(*camera_ui))
+        .filter_map(|(camera, _)| {
+            if let RenderTarget::Window(window_ref) = camera.target {
+                Some(window_ref)
+            } else {
+                None
+            }
+        })
+        .filter_map(|window_ref| {
+            if let WindowRef::Entity(entity) = window_ref {
+                windows.get(entity).ok()
+            } else {
+                primary_window.get_single().ok()
+            }
+        })
+        .filter(|window| window.focused)
+        .find_map(|window| window.cursor_position());
+    cursor_position
 }
 
 #[derive(Component)]
@@ -470,7 +494,7 @@ pub fn hover_system(
             e
         })
         .flat_map(|e| e.entities.iter())
-        .map(|e| *e)
+        .copied()
         .collect();
     if !any_motion {
         return;
@@ -480,7 +504,7 @@ pub fn hover_system(
     for entity in hovered_entities.difference(&new_hovered_entities) {
         elements.set_state(*entity, tags::hover(), false);
     }
-    // add hovered state to newely hovered entityes
+    // add hovered state to newly hovered entities
     for entity in new_hovered_entities.difference(&hovered_entities) {
         elements.set_state(*entity, tags::hover(), true);
     }
@@ -539,8 +563,7 @@ pub fn tab_focus_system(
     if !keyboard.just_pressed(KeyCode::Tab) {
         return;
     }
-    for (entity, _) in elements.iter() {
+    if let Some((entity, _)) = elements.iter().next() {
         requests.send(RequestFocus(entity));
-        break;
     }
 }

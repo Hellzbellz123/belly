@@ -552,7 +552,13 @@ fn handle_input_system(
                     }
                     button_events.send(BtnEvent::Released(*entity));
                 }
+                // this is for clicked events
                 (BtnMode::Press, PointerInputData::Pressed { presses: _ }) => {
+                    button_events.send(BtnEvent::Pressed(*entity));
+                    button_events.send(BtnEvent::Released(*entity));
+                }
+                // this is for touch events
+                (BtnMode::Press, PointerInputData::Down { presses: _ }) => {
                     button_events.send(BtnEvent::Pressed(*entity));
                     button_events.send(BtnEvent::Released(*entity));
                 }
@@ -580,7 +586,7 @@ fn handle_input_system(
                     } else {
                     }
                 }
-                _ => (),
+                e => debug!("{:?}", e),
             }
         }
     }
@@ -729,7 +735,7 @@ fn report_btngroup_changes(
 ) {
     for entity in groups.iter() {
         let Some(state) = states.get_mut(&BtnModeGroup::Entity(entity)) else {
-            continue
+            continue;
         };
         if state.value != state.reported_value {
             events.send(ValueChanged::new(
