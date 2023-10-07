@@ -18,13 +18,42 @@ pub struct ElementsPlugin;
 impl Plugin for ElementsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ElementIdIndex>();
+        app.register_type::<ElementList>();
         app.add_systems(
             PostUpdate,
             invalidate_elements
                 .in_set(InvalidateElements)
                 .before(UiSystem::Layout),
-        );
+        )
+        .add_systems(PreUpdate, update_element_list_for_reflect);
     }
+}
+
+#[derive(Debug, Reflect, Component)]
+pub struct ElementList(Vec<String>);
+
+fn update_element_list_for_reflect(
+    mut commands: Commands,
+    not_ready: Query<(Entity, &Element), Without<ElementList>>,
+    changed: Query<(Entity, &Element, &ElementList), Changed<Element>>,
+) {
+    not_ready.for_each(|(ent, element)| {
+        let mut list: Vec<String> = Vec::new();
+        element
+            .classes
+            .iter()
+            .for_each(|f| list.push(f.to_string()));
+        commands.entity(ent).insert(ElementList(list));
+    });
+
+    changed.for_each(|(ent, element, _old_list)| {
+        let mut list: Vec<String> = Vec::new();
+        element
+            .classes
+            .iter()
+            .for_each(|f| list.push(f.to_string()));
+        commands.entity(ent).insert(ElementList(list));
+    });
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, SystemSet)]
@@ -265,14 +294,20 @@ impl<'w, 's> Elements<'w, 's> {
     }
 
     pub fn set_state(&mut self, entity: Entity, state: Tag, value: bool) {
-        let Some(old_value) = self.states
-                .get(&entity)
-                .and_then(|s| s.get(&state).copied())
-                .or_else(|| if let Ok(element) = self.elements.get(entity) {
+        let Some(old_value) = self
+            .states
+            .get(&entity)
+            .and_then(|s| s.get(&state).copied())
+            .or_else(|| {
+                if let Ok(element) = self.elements.get(entity) {
                     Some(element.state.contains(&state))
                 } else {
                     None
-                }) else { return };
+                }
+            })
+        else {
+            return;
+        };
         if value == old_value {
             return;
         }
