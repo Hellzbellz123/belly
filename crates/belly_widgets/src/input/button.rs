@@ -586,7 +586,7 @@ fn handle_input_system(
                     } else {
                     }
                 }
-                e => debug!("{:?}", e),
+                e => trace!("detected button input that is unhandled {:?}", e),
             }
         }
     }
